@@ -4,12 +4,18 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/queue.h"
+#include "esp_task_wdt.h"
 #include "driver/gpio.h"
 #include "nvs_flash.h"
 #include "nvs.h"
 #include "nvs_handle.hpp"
+#include "driver/adc.h"
+#include "esp_adc_cal.h"
 #include "esp_log.h"
 #include "esp32_pinout.h"
+
+// Debug configs ------------------------------------------------------------------------------------------------------
+// #define MEASURE_ADC_FREQ
 
 // Hardware -----------------------------------------------------------------------------------------------------------
 
@@ -18,6 +24,10 @@
 #define LED_BUILTIN_LEFT (gpio_num_t) GPIO27
 #define BTN_USER (gpio_num_t) GPIO0
 #define BTN_PRESSED_LEVEL 0
+
+#define AUDIO_ADC_CH ADC_CHANNEL_6
+#define AUDIO_ADC_UNIT ADC_UNIT_1
+#define AUDIO_ADC_ATTEN ADC_ATTEN_DB_6
 
 // Application configs ------------------------------------------------------------------------------------------------
 #define STORAGE_NAMESPACE "ESPViz"
@@ -29,6 +39,7 @@
 // Inline Helpers -----------------------------------------------------------------------------------------------------
 #define delay(ms) vTaskDelay(pdMS_TO_TICKS(ms))
 #define millis() esp_timer_get_time() / 1000ULL;
+#define micros() esp_timer_get_time();
 
 // Global variables ---------------------------------------------------------------------------------------------------
 static const char *APP_NAME = "ESPViz";
@@ -36,6 +47,7 @@ esp_err_t err;
 static uint8_t s_led_state = 0;
 TaskHandle_t task1Handler = NULL;
 TaskHandle_t task2Handler = NULL;
+TaskHandle_t taskADCHandler = NULL;
 TaskHandle_t taskBtnISRHandler = NULL;
 static xQueueHandle btn_evt_queue = nullptr;
 std::shared_ptr<nvs::NVSHandle> storageHandler;
@@ -199,6 +211,42 @@ static uint8_t isUsrBtnPressed() {
 	return gpio_get_level(BTN_USER) == BTN_PRESSED_LEVEL;
 }
 
+// ADC ----------------------------------------------------------------------------------------------------------------
+uint16_t adc_val;
+uint32_t adc_mean;
+int adc_raw[64];
+void adcTask(void *arg) {
+	ESP_ERROR_CHECK(adc1_config_width((adc_bits_width_t) ADC_WIDTH_BIT_DEFAULT));
+	ESP_ERROR_CHECK(adc1_config_channel_atten((adc1_channel_t) AUDIO_ADC_CH, AUDIO_ADC_ATTEN));
+
+	while (1) {
+#ifdef MEASURE_ADC_FREQ
+		uint64_t xStart = micros();
+#endif
+
+		adc_mean = 0;
+		for (uint8_t i = 0; i < 64; i++) {
+			adc_val = adc1_get_raw((adc1_channel_t) AUDIO_ADC_CH);
+			adc_mean += adc_val;
+			adc_raw[i] = adc_val;
+		}
+		adc_mean >>= 6;
+		for (uint8_t i = 0; i < 64; i++) {
+			adc_raw[i] -= adc_mean;
+		}
+		vTaskDelay(1);
+
+#ifdef MEASURE_ADC_FREQ
+		uint64_t xEnd = micros();
+		uint32_t timeDiff = xEnd - xStart;
+		ESP_LOGI(APP_NAME, "ADC time 64 sample: %dus", timeDiff);
+		float freq = 64.0 * 1000000.0 / timeDiff;
+		ESP_LOGI(APP_NAME, "ADC Freq: %0.2fkHz", freq/1000);
+		vTaskDelay(pdMS_TO_TICKS(1000));
+#endif
+	}
+}
+
 // Main ---------------------------------------------------------------------------------------------------------------
 static void powerOnResetRoutine() {
 	if (!isUsrBtnPressed()) {
@@ -237,7 +285,9 @@ extern "C" void app_main() {
 	setLED();
 	setBtn();
 	delay(1000);
+
 	xTaskCreate(task1, "task1", 4096, NULL, 10, &task1Handler);
 	xTaskCreate(task2, "task2", 4096, NULL, 10, &task2Handler);
+	xTaskCreate(adcTask, "adcTask", 4096, NULL, 10, &taskADCHandler);
 	ESP_LOGI(APP_NAME, "Ending...");
 }
