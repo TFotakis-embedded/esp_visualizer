@@ -1,6 +1,7 @@
 #include <stdio.h>
-#include <string.h>
 #include <stdlib.h>
+#include <string.h>
+#include <math.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/queue.h"
@@ -11,6 +12,8 @@
 #include "nvs_handle.hpp"
 #include "driver/adc.h"
 #include "esp_adc_cal.h"
+#include "esp_dsp.h"
+
 #include "esp_log.h"
 #include "esp32_pinout.h"
 
@@ -48,6 +51,7 @@ static uint8_t s_led_state = 0;
 TaskHandle_t task1Handler = NULL;
 TaskHandle_t task2Handler = NULL;
 TaskHandle_t taskADCHandler = NULL;
+TaskHandle_t taskFFTHandler = NULL;
 TaskHandle_t taskBtnISRHandler = NULL;
 static xQueueHandle btn_evt_queue = nullptr;
 std::shared_ptr<nvs::NVSHandle> storageHandler;
@@ -212,9 +216,18 @@ static uint8_t isUsrBtnPressed() {
 }
 
 // ADC ----------------------------------------------------------------------------------------------------------------
+// #define N_SAMPLES 64
+// #define N_SAMPLES 128
+// #define N_SAMPLES 256
+// #define N_SAMPLES 512
+#define N_SAMPLES 1024
+// #define N_SAMPLES 2048
+
+void audioFFT();
+
 uint16_t adc_val;
 uint32_t adc_mean;
-int adc_raw[64];
+float adc_raw[N_SAMPLES];
 void adcTask(void *arg) {
 	ESP_ERROR_CHECK(adc1_config_width((adc_bits_width_t) ADC_WIDTH_BIT_DEFAULT));
 	ESP_ERROR_CHECK(adc1_config_channel_atten((adc1_channel_t) AUDIO_ADC_CH, AUDIO_ADC_ATTEN));
@@ -225,26 +238,95 @@ void adcTask(void *arg) {
 #endif
 
 		adc_mean = 0;
-		for (uint8_t i = 0; i < 64; i++) {
+		for (uint16_t i = 0; i < N_SAMPLES; i++) {
 			adc_val = adc1_get_raw((adc1_channel_t) AUDIO_ADC_CH);
 			adc_mean += adc_val;
 			adc_raw[i] = adc_val;
 		}
 		adc_mean >>= 6;
-		for (uint8_t i = 0; i < 64; i++) {
+		for (uint16_t i = 0; i < N_SAMPLES; i++) {
 			adc_raw[i] -= adc_mean;
 		}
+		audioFFT();
+		// vTaskResume(taskFFTHandler);
+		// delay(1000);
 		vTaskDelay(1);
 
 #ifdef MEASURE_ADC_FREQ
 		uint64_t xEnd = micros();
 		uint32_t timeDiff = xEnd - xStart;
-		ESP_LOGI(APP_NAME, "ADC time 64 sample: %dus", timeDiff);
-		float freq = 64.0 * 1000000.0 / timeDiff;
-		ESP_LOGI(APP_NAME, "ADC Freq: %0.2fkHz", freq/1000);
+		ESP_LOGI(APP_NAME, "ADC time N_SAMPLES sample: %dus", timeDiff);
+		float freq = N_SAMPLES .0 * 1000000.0 / timeDiff;
+		ESP_LOGI(APP_NAME, "ADC Freq: %0.2fkHz", freq / 1000);
 		vTaskDelay(pdMS_TO_TICKS(1000));
 #endif
 	}
+}
+
+int N = N_SAMPLES;
+// Window coefficients
+__attribute__((aligned(16))) float wind[N_SAMPLES];
+// working complex array
+__attribute__((aligned(16))) float y_cf[N_SAMPLES * 2];
+// Pointers to result arrays
+float *y1_cf = &y_cf[0];
+
+// void audioFFT(void *arg) {
+void audioFFT() {
+	// while (true) {
+		esp_err_t err = dsps_fft2r_init_fc32(NULL, CONFIG_DSP_MAX_FFT_SIZE);
+		if (err != ESP_OK) {
+			ESP_LOGE(APP_NAME, "Not possible to initialize FFT. Error = %i", err);
+			return;
+		}
+
+		// Generate hann window
+		dsps_wind_hann_f32(wind, N);
+		// dsps_tone_gen_f32(adc_raw, N, 10.0, 0.2, 0);
+
+		for (int i = 0; i < N; i++) {
+			y_cf[i * 2 + 0] = adc_raw[i] * wind[i];
+			y_cf[i * 2 + 1] = 0;
+		}
+
+		dsps_fft2r_fc32(y_cf, N);
+		dsps_bit_rev_fc32(y_cf, N);
+		dsps_cplx2reC_fc32(y_cf, N);
+
+		for (int i = 0; i < N / 2; i++) {
+			y1_cf[i] = 10 * log10f((y1_cf[i * 2 + 0] * y1_cf[i * 2 + 0] + y1_cf[i * 2 + 1] * y1_cf[i * 2 + 1]) / N);
+		}
+
+		float min = y1_cf[0];
+		float max = y1_cf[0];
+		for (int i = 0; i < N / 2; i++) {
+			if (min > y1_cf[i]) {
+				min = y1_cf[i];
+			}
+
+			if (max < y1_cf[i]) {
+				max = y1_cf[i];
+			}
+		}
+
+		max -= min;
+		for (int i = 0; i < N / 2; i++) {
+			y1_cf[i] -= min;
+			y1_cf[i] /= max;
+			y1_cf[i] = y1_cf[i] * y1_cf[i];
+			y1_cf[i] = y1_cf[i] * y1_cf[i];
+			y1_cf[i] *= 1000;
+		}
+		y1_cf[0] = 0;
+		y1_cf[1] = 0;
+
+		// dsps_view(const float *data, int32_t len, int width, int height, float min, float max, char view_char)
+		// dsps_view(y1_cf, N / 2, fmin(N / 2, 64), 30, -10, 1100, '.');
+
+		// vTaskDelete(NULL);
+		// vTaskSuspend(NULL);
+		// delay(200);
+	// }
 }
 
 // Main ---------------------------------------------------------------------------------------------------------------
@@ -286,8 +368,9 @@ extern "C" void app_main() {
 	setBtn();
 	delay(1000);
 
-	xTaskCreate(task1, "task1", 4096, NULL, 10, &task1Handler);
-	xTaskCreate(task2, "task2", 4096, NULL, 10, &task2Handler);
+	// xTaskCreate(task1, "task1", 4096, NULL, 10, &task1Handler);
+	// xTaskCreate(task2, "task2", 4096, NULL, 10, &task2Handler);
 	xTaskCreate(adcTask, "adcTask", 4096, NULL, 10, &taskADCHandler);
-	ESP_LOGI(APP_NAME, "Ending...");
+	// xTaskCreate(audioFFT, "audioFFT", 4096, NULL, 10, &taskFFTHandler);
+	// ESP_LOGI(APP_NAME, "Ending...");
 }
