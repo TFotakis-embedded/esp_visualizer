@@ -61,12 +61,32 @@ void setLED() {
 	gpio_pad_select_gpio(LED_BUILTIN_LEFT);
 	gpio_set_direction(LED_BUILTIN_LEFT, GPIO_MODE_OUTPUT);
 	gpio_set_level(LED_BUILTIN_LEFT, s_led_state);
+
+	gpio_pad_select_gpio(GPIO33);
+	gpio_set_direction(GPIO33, GPIO_MODE_OUTPUT);
+	gpio_set_level(GPIO33, s_led_state);
+
+	gpio_pad_select_gpio(GPIO25);
+	gpio_set_direction(GPIO25, GPIO_MODE_OUTPUT);
+	gpio_set_level(GPIO25, s_led_state);
+
+	gpio_pad_select_gpio(GPIO26);
+	gpio_set_direction(GPIO26, GPIO_MODE_OUTPUT);
+	gpio_set_level(GPIO26, s_led_state);
+
+	gpio_pad_select_gpio(GPIO27);
+	gpio_set_direction(GPIO27, GPIO_MODE_OUTPUT);
+	gpio_set_level(GPIO27, s_led_state);
 }
 
 static void toggle_led() {
 	s_led_state = !s_led_state;
 	ESP_LOGI(APP_NAME, "LED: %s", s_led_state == true ? "ON" : "OFF");
 	gpio_set_level(LED_BUILTIN_LEFT, s_led_state);
+	gpio_set_level(GPIO33, s_led_state);
+	gpio_set_level(GPIO25, s_led_state);
+	gpio_set_level(GPIO26, s_led_state);
+	gpio_set_level(GPIO27, s_led_state);
 }
 
 // Storage ------------------------------------------------------------------------------------------------------------
