@@ -1,5 +1,4 @@
 #ifndef ESP32_PINOUT_H
-
 #define ESP32_PINOUT_H
 
 #define GPIO0 (gpio_num_t) 0 // input pulled up | outputs PWM signal at boot
